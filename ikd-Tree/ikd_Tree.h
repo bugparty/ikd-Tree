@@ -90,9 +90,9 @@ public:
     using PointVector = vector<PointType, Eigen::aligned_allocator<PointType>>;
     using Ptr = shared_ptr<KD_TREE<PointType>>;
     struct KD_TREE_NODE{
-        PointType point;
-        uint8_t division_axis;  
-        int TreeSize = 1;
+        PointType point;        //节点中的点
+        uint8_t division_axis;  //节点的划分轴
+        int TreeSize = 1;       //以当前节点为根的子树的大小
         int invalid_point_num = 0;
         int down_del_num = 0;
         bool point_deleted = false;
@@ -102,9 +102,9 @@ public:
         bool need_push_down_to_left = false;
         bool need_push_down_to_right = false;
         bool working_flag = false;
-        float radius_sq;
+        float radius_sq; //节点的包围盒的半径的平方
         pthread_mutex_t push_down_mutex_lock;
-        float node_range_x[2], node_range_y[2], node_range_z[2];   
+        float node_range_x[2], node_range_y[2], node_range_z[2]; // x,y,z方向的包围盒
         KD_TREE_NODE *left_son_ptr = nullptr;
         KD_TREE_NODE *right_son_ptr = nullptr;
         KD_TREE_NODE *father_ptr = nullptr;
@@ -119,7 +119,7 @@ public:
         bool tree_deleted, tree_downsample_deleted;
         operation_set op;
     };
-
+    /// @brief Point with a comparator of distance 
     struct PointType_CMP{
         PointType point;
         float dist = 0.0;
@@ -132,7 +132,7 @@ public:
             else return dist < a.dist;
         }    
     };
-
+/// @brief MaxHeap use a array to store the heap tree
     class MANUAL_HEAP{
         public:
             MANUAL_HEAP(int max_capacity = 100){
@@ -859,19 +859,29 @@ private:
     void Search_by_range(KD_TREE_NODE *root, BoxPointType boxpoint, PointVector &Storage){
         if (root == nullptr) return;
         Push_Down(root);
+        // if the box does not intersect with the node, return
         if (boxpoint.vertex_max[0] <= root->node_range_x[0] || boxpoint.vertex_min[0] > root->node_range_x[1]) return;
         if (boxpoint.vertex_max[1] <= root->node_range_y[0] || boxpoint.vertex_min[1] > root->node_range_y[1]) return;
         if (boxpoint.vertex_max[2] <= root->node_range_z[0] || boxpoint.vertex_min[2] > root->node_range_z[1]) return;
-        if (boxpoint.vertex_min[0] <= root->node_range_x[0] && boxpoint.vertex_max[0] > root->node_range_x[1] && boxpoint.vertex_min[1] <= root->node_range_y[0] && boxpoint.vertex_max[1] > root->node_range_y[1] && boxpoint.vertex_min[2] <= root->node_range_z[0] && boxpoint.vertex_max[2] > root->node_range_z[1]){
+        // If the box contains the whole node subtree, flatten the tree
+        if (boxpoint.vertex_min[0] <= root->node_range_x[0] && boxpoint.vertex_max[0] > root->node_range_x[1] &&
+            boxpoint.vertex_min[1] <= root->node_range_y[0] && boxpoint.vertex_max[1] > root->node_range_y[1] &&
+            boxpoint.vertex_min[2] <= root->node_range_z[0] && boxpoint.vertex_max[2] > root->node_range_z[1]){
             flatten(root, Storage, NOT_RECORD);
             return;
         }
-        if (boxpoint.vertex_min[0] <= root->point.x && boxpoint.vertex_max[0] > root->point.x && boxpoint.vertex_min[1] <= root->point.y && boxpoint.vertex_max[1] > root->point.y && boxpoint.vertex_min[2] <= root->point.z && boxpoint.vertex_max[2] > root->point.z){
+        // If the box contains the point, add the point to the storage
+        if (boxpoint.vertex_min[0] <= root->point.x && boxpoint.vertex_max[0] > root->point.x &&
+            boxpoint.vertex_min[1] <= root->point.y && boxpoint.vertex_max[1] > root->point.y &&
+            boxpoint.vertex_min[2] <= root->point.z && boxpoint.vertex_max[2] > root->point.z){
             if (!root->point_deleted) Storage.push_back(root->point);
         }
+        // if not rebuilding the left son, search the left son
+        // if is rebuilding the left son, lock the search flag and search the left son
         if ((Rebuild_Ptr == nullptr) || root->left_son_ptr != *Rebuild_Ptr){
             Search_by_range(root->left_son_ptr, boxpoint, Storage);
         } else {
+            // wait for rebuild thread to finish
             pthread_mutex_lock(&search_flag_mutex);
             Search_by_range(root->left_son_ptr, boxpoint, Storage);
             pthread_mutex_unlock(&search_flag_mutex);
@@ -891,35 +901,44 @@ private:
             return;
         Push_Down(root);
         PointType range_center;
+        //calculate the center of the root node
         range_center.x = (root->node_range_x[0] + root->node_range_x[1]) * 0.5;
         range_center.y = (root->node_range_y[0] + root->node_range_y[1]) * 0.5;
         range_center.z = (root->node_range_z[0] + root->node_range_z[1]) * 0.5;
+        // calculate the distance between the center and the point
         float dist = sqrt(calc_dist(range_center, point));
         if (dist > radius + sqrt(root->radius_sq)) return;
+        // if the whole range of the node is within the radius regret of the point, flatten the tree
         if (dist <= radius - sqrt(root->radius_sq))
         {
             flatten(root, Storage, NOT_RECORD);
             return;
         }
+        // if the point is within the radius regret of the point and is not going to be deleted,
+        // add the point to the storage
         if (!root->point_deleted && calc_dist(root->point, point) <= radius * radius){
             Storage.push_back(root->point);
         }
+        // if not rebuilding the left son, search the left son
         if ((Rebuild_Ptr == nullptr) || root->left_son_ptr != *Rebuild_Ptr)
         {
             Search_by_radius(root->left_son_ptr, point, radius, Storage);
         }
         else
         {
+            // wait for rebuild thread to finish
             pthread_mutex_lock(&search_flag_mutex);
             Search_by_radius(root->left_son_ptr, point, radius, Storage);
             pthread_mutex_unlock(&search_flag_mutex);
         }
+        // if not rebuilding the right son, search the right son
         if ((Rebuild_Ptr == nullptr) || root->right_son_ptr != *Rebuild_Ptr)
         {
             Search_by_radius(root->right_son_ptr, point, radius, Storage);
         }
         else
         {
+            // wait for rebuild thread to finish
             pthread_mutex_lock(&search_flag_mutex);
             Search_by_radius(root->right_son_ptr, point, radius, Storage);
             pthread_mutex_unlock(&search_flag_mutex);
